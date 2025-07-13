@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Merkle Tree Visualizer</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/default.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 20px; background: #f0f2f5; }
+    h1 { text-align: center; color: #333; }
+    #summary { max-width: 800px; margin: 10px auto; text-align: center; font-size: 14px; color: #555; }
+    #fileInput { display: block; margin: 10px auto; }
+    #tree { width: 100%; height: 500px; border: 1px solid #ddd; background: #fff; }
+    #details { max-width: 800px; margin: 20px auto; padding: 15px; border-radius: 6px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    #details h2 { margin-top: 0; font-size: 18px; color: #333; }
+    .section { margin-bottom: 1em; }
+    pre { background: #272822; color: #f8f8f2; padding: 10px; border-radius: 4px; overflow: auto; max-height: 200px; }
+    details { margin-bottom: 0.5em; }
+    summary { cursor: pointer; font-weight: bold; }
+    button.copy-btn { margin-top: 5px; padding: 4px 8px; font-size: 12px; border: none; background: #007bff; color: #fff; border-radius: 3px; cursor: pointer; }
+    .link { fill: none; stroke: #888; stroke-width: 1.2px; }
+    .node { cursor: pointer; }
+    .node circle { stroke: #555; stroke-width: 1px; }
+    .node text { font: 10px monospace; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <h1>Merkle Tree Visualizer</h1>
+  <div id="summary">
+    <p>Inspect how large codebases get parsed into hash trees, powering tools like Cursor.</p>
+    <ul style="list-style:none; padding:0; text-align:left; max-width:600px; margin:10px auto; color:#444;">
+      <li>• Files are split into logical chunks</li>
+      <li>• Each chunk gets a SHA-256 hash</li>
+      <li>• Hashes combine up to an efficient Merkle root</li>
+      <li>• Internal nodes represent combined subtrees</li>
+      <li>• Click any node to see exact code behind it</li>
+    </ul>
+  </div>
+  <input type="file" id="fileInput" accept=".txt,.py,.js,.java,.md">
+  <div id="tree"></div>
+  <div id="details">
+    <h2>Node Details</h2>
+    <div id="info"><em>Select a node to view its code or subtree.</em></div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => hljs.highlightAll());
+
+    async function computeHash(data) {
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(data));
+      return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+    function splitChunks(text) {
+      return text.split(/\n\s*\n/).filter(c => c.trim());
+    }
+    async function buildTree(chunks) {
+      let nodes = await Promise.all(chunks.map(async c => ({ name: await computeHash(c), chunk: c, children: [] })));
+      while (nodes.length > 1) {
+        const next = [];
+        for (let i = 0; i < nodes.length; i += 2) {
+          const left = nodes[i];
+          const right = nodes[i + 1] || nodes[i];
+          const combinedHash = await computeHash(left.name + right.name);
+          next.push({ name: combinedHash, children: [left, right] });
+        }
+        nodes = next;
+      }
+      return nodes[0];
+    }
+    function escapeHTML(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function gatherChunks(node) {
+      if (node.chunk) return [node.chunk];
+      let all = [];
+      node.children.forEach(c => all = all.concat(gatherChunks(c)));
+      return all;
+    }
+    function showDetails(d) {
+      const isLeaf = !!d.data.chunk;
+      let html = `
+        <div class='section'><strong>Hash:</strong> <code>${d.data.name}</code>
+        <button class='copy-btn' onclick="navigator.clipboard.writeText('${d.data.name}')">Copy Hash</button></div>`;
+
+      if (isLeaf) {
+        html += `<div class='section'><strong>Chunk Code:</strong>
+          <pre><code class='language-${getLang()}'>${escapeHTML(d.data.chunk)}</code></pre>
+          <button class='copy-btn' onclick="navigator.clipboard.writeText(\`${escapeHTML(d.data.chunk)}\`)">Copy Code</button>
+        </div>`;
+      } else {
+        const allChunks = gatherChunks(d.data);
+        html += `<div class='section'><strong>Combined Subtree (${allChunks.length} chunks)</strong></div>`;
+        allChunks.forEach((chunk, i) => {
+          html += `<details><summary>Chunk ${i+1}</summary>
+            <pre><code class='language-${getLang()}'>${escapeHTML(chunk)}</code></pre>
+            <button class='copy-btn' onclick="navigator.clipboard.writeText(\`${escapeHTML(chunk)}\`)">Copy</button>
+          </details>`;
+        });
+      }
+      document.getElementById('info').innerHTML = html;
+      hljs.highlightAll();
+    }
+    function getLang() {
+      const file = document.getElementById('fileInput').files[0];
+      return file ? file.name.split('.').pop() : 'txt';
+    }
+    async function render(root) {
+      const W = document.getElementById('tree').clientWidth;
+      const H = document.getElementById('tree').clientHeight;
+      d3.select('#tree').html('');
+      const svg = d3.select('#tree').append('svg').attr('width', W).attr('height', H)
+        .call(d3.zoom().scaleExtent([0.5, 3]).on('zoom', ev => g.attr('transform', ev.transform)));
+      const g = svg.append('g').attr('transform', 'translate(40,40)');
+      const tree = d3.tree().size([W - 80, H - 80]);
+      const rootNode = tree(d3.hierarchy(root));
+      g.selectAll('.link')
+        .data(rootNode.links())
+        .join('path')
+        .attr('class', 'link')
+        .attr('d', d3.linkVertical().x(d=>d.x).y(d=>d.y));
+      const nd = g.selectAll('g.node')
+        .data(rootNode.descendants())
+        .join('g')
+        .attr('class', 'node')
+        .attr('transform', d=>`translate(${d.x},${d.y})`)
+        .on('click', (e, d) => showDetails(d));
+      nd.append('circle')
+        .attr('r', 8)
+        .style('fill', d=> d.data.chunk ? '#6baed6' : '#fd8d3c')
+        .append('title').text(d=>d.data.name);
+      nd.append('text')
+        .attr('dy', -12)
+        .attr('text-anchor', 'middle')
+        .text(d=>d.data.name.slice(0, 8));
+    }
+    document.getElementById('fileInput').addEventListener('change', async e => {
+      const text = await e.target.files[0].text();
+      const root = await buildTree(splitChunks(text));
+      render(root);
+      document.getElementById('info').innerHTML = '<em>Click a node to inspect its code or subtree.</em>';
+    });
+  </script>
+</body>
+</html>
